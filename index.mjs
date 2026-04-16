@@ -59,12 +59,14 @@ ${hoursStr}
 
 ━━━ USO DE FERRAMENTAS ━━━
 Use as ferramentas quando necessário, antes de responder:
-- get_available_slots: quando o cliente perguntar por horários ou quiser agendar
+- get_available_slots: quando o cliente perguntar por horários ou quiser agendar/remarcar
 - create_appointment: quando o cliente confirmar data, horário e procedimento
 - cancel_appointment: quando o cliente quiser cancelar um agendamento existente
-- get_client_appointments: quando o cliente perguntar sobre seus agendamentos
+- reschedule_appointment: quando o cliente quiser mudar a data ou horário de um agendamento existente
+- get_client_appointments: quando o cliente perguntar sobre seus agendamentos ou antes de cancelar/remarcar
 
-Ao chamar create_appointment, resolva datas relativas ("amanhã", "sexta") com base em hoje (${todayISO}).
+Ao resolver datas relativas ("amanhã", "sexta", "semana que vem"), use como base hoje (${todayISO}).
+Para remarcar: primeiro chame get_client_appointments para obter o appointmentId, depois get_available_slots para confirmar disponibilidade, então reschedule_appointment.
 
 ━━━ FORMATO DA RESPOSTA FINAL ━━━
 Após usar as ferramentas necessárias, responda SOMENTE com JSON válido. Nada fora do JSON.
@@ -119,6 +121,22 @@ function buildTools() {
             appointmentId: { type: "string", description: "ID do agendamento a cancelar" },
           },
           required: ["appointmentId"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "reschedule_appointment",
+        description: "Remarca um agendamento existente para nova data e/ou horário",
+        parameters: {
+          type: "object",
+          properties: {
+            appointmentId: { type: "string", description: "ID do agendamento a remarcar" },
+            newDate:       { type: "string", description: "Nova data no formato YYYY-MM-DD" },
+            newTime:       { type: "string", description: "Novo horário no formato HH:MM" },
+          },
+          required: ["appointmentId", "newDate", "newTime"],
         },
       },
     },
@@ -189,8 +207,29 @@ async function executeTool(toolName, args, { db, clinicId, waId, clientName }) {
       return { success: result.modifiedCount > 0, appointmentId };
     }
 
+    case "reschedule_appointment": {
+      const { appointmentId, newDate, newTime } = args;
+      // Verifica se o novo horário está disponível
+      const conflict = await db.collection("appointments").findOne({
+        clinicId,
+        date: newDate,
+        time: newTime,
+        status: { $ne: "cancelado" },
+        _id: { $ne: new ObjectId(appointmentId) },
+      });
+      if (conflict) {
+        return { success: false, reason: `Horário ${newTime} do dia ${newDate} já está ocupado` };
+      }
+      const result = await db.collection("appointments").updateOne(
+        { _id: new ObjectId(appointmentId), clientWaId: waId },
+        { $set: { date: newDate, time: newTime, status: "confirmado", updatedAt: new Date() } }
+      );
+      console.log(`[tool] 🔄 Agendamento remarcado: ${appointmentId} → ${newDate} às ${newTime}`);
+      return { success: result.modifiedCount > 0, appointmentId, newDate, newTime };
+    }
+
     case "get_client_appointments": {
-      const today = new Date().toISOString().slice(0, 10);
+      const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
       const appointments = await db.collection("appointments")
         .find({ clientWaId: waId, clinicId, status: { $ne: "cancelado" }, date: { $gte: today } })
         .sort({ date: 1, time: 1 })
