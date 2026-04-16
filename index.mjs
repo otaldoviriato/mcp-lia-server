@@ -7,12 +7,12 @@ import OpenAI from "openai";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-const PORT        = parseInt(process.env.PORT || "3001", 10);
+const PORT = parseInt(process.env.PORT || "3001", 10);
 const MONGODB_URI = process.env.MONGODB_URI;
-const MONGODB_DB  = process.env.MONGODB_DB  || "lia-dev";
-const AUTH_TOKEN  = process.env.MCP_AUTH_TOKEN;
+const MONGODB_DB = process.env.MONGODB_DB || "lia-dev";
+const AUTH_TOKEN = process.env.MCP_AUTH_TOKEN;
 
-if (!MONGODB_URI)                throw new Error("MONGODB_URI env var é obrigatória");
+if (!MONGODB_URI) throw new Error("MONGODB_URI env var é obrigatória");
 if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY env var é obrigatória");
 
 // ── Clientes externos ─────────────────────────────────────────────────────────
@@ -33,9 +33,9 @@ async function getDb() {
 // ── System Prompt ─────────────────────────────────────────────────────────────
 
 function buildSystemPrompt({ clinicName, clinicDescription, services, businessHours, clientName, todayStr, todayISO }) {
-  const base        = clinicDescription || "Você é uma atendente de clínica estética.";
+  const base = clinicDescription || "Você é uma atendente de clínica estética.";
   const servicesStr = services?.length ? `Serviços oferecidos: ${services.join(", ")}` : "";
-  const hoursStr    = businessHours    ? `Horários de funcionamento: ${JSON.stringify(businessHours)}` : "";
+  const hoursStr = businessHours ? `Horários de funcionamento: ${JSON.stringify(businessHours)}` : "";
 
   return `${base}
 
@@ -98,11 +98,11 @@ function buildTools() {
         parameters: {
           type: "object",
           properties: {
-            date:         { type: "string", description: "Data no formato YYYY-MM-DD" },
-            time:         { type: "string", description: "Horário no formato HH:MM" },
-            procedure:    { type: "string", description: "Nome do procedimento confirmado" },
+            date: { type: "string", description: "Data no formato YYYY-MM-DD" },
+            time: { type: "string", description: "Horário no formato HH:MM" },
+            procedure: { type: "string", description: "Nome do procedimento confirmado" },
             professional: { type: "string", description: "Nome do profissional (opcional)" },
-            notes:        { type: "string", description: "Observações adicionais (opcional)" },
+            notes: { type: "string", description: "Observações adicionais (opcional)" },
           },
           required: ["date", "time", "procedure"],
         },
@@ -148,7 +148,7 @@ async function executeTool(toolName, args, { db, clinicId, waId, clientName }) {
         .project({ time: 1, _id: 0 })
         .toArray();
       const takenSlots = existing.map(a => a.time);
-      const allSlots = ["08:00","09:00","10:00","11:00","14:00","15:00","16:00","17:00","18:00"];
+      const allSlots = ["08:00", "09:00", "10:00", "11:00", "14:00", "15:00", "16:00", "17:00", "18:00"];
       const available = allSlots.filter(s => !takenSlots.includes(s));
       return { date, available, taken: takenSlots };
     }
@@ -158,17 +158,17 @@ async function executeTool(toolName, args, { db, clinicId, waId, clientName }) {
       const now = new Date();
       const result = await db.collection("appointments").insertOne({
         clinicId,
-        clientWaId:   waId,
+        clientWaId: waId,
         clientName,
         date,
         time,
         procedure,
         professional: professional ?? null,
-        notes:        notes        ?? null,
-        status:       "confirmado",
-        source:       "whatsapp_ia",
-        createdAt:    now,
-        updatedAt:    now,
+        notes: notes ?? null,
+        status: "confirmado",
+        source: "whatsapp_ia",
+        createdAt: now,
+        updatedAt: now,
       });
       // Linka o agendamento ao cliente
       await db.collection("clients").updateOne(
@@ -197,12 +197,12 @@ async function executeTool(toolName, args, { db, clinicId, waId, clientName }) {
         .limit(5)
         .toArray();
       return appointments.map(a => ({
-        id:           a._id.toString(),
-        date:         a.date,
-        time:         a.time,
-        procedure:    a.procedure,
+        id: a._id.toString(),
+        date: a.date,
+        time: a.time,
+        procedure: a.procedure,
         professional: a.professional,
-        status:       a.status,
+        status: a.status,
       }));
     }
 
@@ -222,7 +222,7 @@ async function handleMessage({ waId, clientName, message, clinicPhone }) {
   if (!clinic) throw new Error(`Clínica não encontrada para o número: ${cleanPhone}`);
 
   const clinicIdStr = clinic._id.toString();
-  const clinicId    = clinic._id;
+  const clinicId = clinic._id;
 
   // 2. Contexto estático + histórico do cliente (em paralelo)
   const [config, clientDoc] = await Promise.all([
@@ -234,18 +234,20 @@ async function handleMessage({ waId, clientName, message, clinicPhone }) {
   ]);
 
   const services = config?.procedures?.map(p => p.name) ?? config?.services ?? [];
-  const history  = clientDoc?.messages ?? [];
+  const history = clientDoc?.messages ?? [];
 
-  const todayISO = new Date().toISOString().slice(0, 10);
-  const todayStr = new Date().toLocaleDateString("pt-BR", {
+  const today = new Date();
+  const todayISO = today.toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
+  const todayStr = today.toLocaleDateString("pt-BR", {
+    timeZone: "America/Sao_Paulo",
     weekday: "long", year: "numeric", month: "long", day: "numeric",
   });
 
   const systemPrompt = buildSystemPrompt({
-    clinicName:        clinic.name,
+    clinicName: clinic.name,
     clinicDescription: config?.description ?? null,
     services,
-    businessHours:     config?.schedule ?? config?.businessHours ?? null,
+    businessHours: config?.schedule ?? config?.businessHours ?? null,
     clientName,
     todayStr,
     todayISO,
@@ -255,7 +257,7 @@ async function handleMessage({ waId, clientName, message, clinicPhone }) {
   const loopMessages = [
     { role: "system", content: systemPrompt },
     ...history.map(m => ({
-      role:    m.from === "client" ? "user" : "assistant",
+      role: m.from === "client" ? "user" : "assistant",
       content: m.text,
     })),
     { role: "user", content: message },
@@ -267,9 +269,9 @@ async function handleMessage({ waId, clientName, message, clinicPhone }) {
 
   for (let i = 0; i < 5; i++) {
     const aiResp = await openai.chat.completions.create({
-      model:       "gpt-4o-mini",
-      max_tokens:  600,
-      messages:    loopMessages,
+      model: "gpt-4o-mini",
+      max_tokens: 600,
+      messages: loopMessages,
       tools,
       tool_choice: "auto",
     });
@@ -281,16 +283,16 @@ async function handleMessage({ waId, clientName, message, clinicPhone }) {
       loopMessages.push(aiMessage);
 
       for (const toolCall of aiMessage.tool_calls) {
-        const args   = JSON.parse(toolCall.function.arguments);
+        const args = JSON.parse(toolCall.function.arguments);
         console.log(`[tool] → ${toolCall.function.name}`, args);
 
         const result = await executeTool(toolCall.function.name, args, { db, clinicId, waId, clientName });
         console.log(`[tool] ← ${toolCall.function.name}`, result);
 
         loopMessages.push({
-          role:         "tool",
+          role: "tool",
           tool_call_id: toolCall.id,
-          content:      JSON.stringify(result),
+          content: JSON.stringify(result),
         });
       }
     } else {
@@ -309,8 +311,8 @@ async function handleMessage({ waId, clientName, message, clinicPhone }) {
   } catch {
     // Fallback: se a IA não retornou JSON perfeito, usa o texto como reply
     parsed = {
-      reply:           finalContent,
-      clientStatus:    "atendimento",
+      reply: finalContent,
+      clientStatus: "atendimento",
       activitySummary: `${clientName} entrou em contato`,
     };
   }
@@ -318,32 +320,32 @@ async function handleMessage({ waId, clientName, message, clinicPhone }) {
   if (!parsed.reply) throw new Error(`Resposta sem campo reply: ${finalContent}`);
 
   // 6. Salvar mensagens e atualizar cliente
-  const now       = new Date();
-  const clientMsg = { from: "client", text: message,      createdAt: now.toISOString() };
-  const iaMsg     = { from: "ia",     text: parsed.reply, createdAt: new Date(now.getTime() + 1).toISOString() };
+  const now = new Date();
+  const clientMsg = { from: "client", text: message, createdAt: now.toISOString() };
+  const iaMsg = { from: "ia", text: parsed.reply, createdAt: new Date(now.getTime() + 1).toISOString() };
 
   await db.collection("clients").updateOne(
     { waId, clinicId },
     {
       $set: {
-        name:            clientName,
-        phone:           waId,
+        name: clientName,
+        phone: waId,
         clinicId,
-        status:          parsed.clientStatus  ?? "atendimento",
+        status: parsed.clientStatus ?? "atendimento",
         activitySummary: parsed.activitySummary ?? `${clientName} entrou em contato`,
-        lastMessageAt:   now,
-        updatedAt:       now,
+        lastMessageAt: now,
+        updatedAt: now,
       },
       $push: { messages: { $each: [clientMsg, iaMsg] } },
       $setOnInsert: {
-        tags:                   [],
-        intent:                 "Curioso",
-        potential:              "Médio",
-        aiInsight:              "",
-        conversationStatus:     "active",
-        pendingDoubtId:         null,
+        tags: [],
+        intent: "Curioso",
+        potential: "Médio",
+        aiInsight: "",
+        conversationStatus: "active",
+        pendingDoubtId: null,
         scheduledAppointmentId: null,
-        createdAt:              now,
+        createdAt: now,
       },
     },
     { upsert: true }
@@ -352,8 +354,8 @@ async function handleMessage({ waId, clientName, message, clinicPhone }) {
   console.log(`[handleMessage] ✓ ${clientName} (${waId}) — status: ${parsed.clientStatus}`);
 
   return {
-    reply:           parsed.reply,
-    clientStatus:    parsed.clientStatus  ?? "atendimento",
+    reply: parsed.reply,
+    clientStatus: parsed.clientStatus ?? "atendimento",
     activitySummary: parsed.activitySummary ?? `${clientName} entrou em contato`,
   };
 }
@@ -361,7 +363,7 @@ async function handleMessage({ waId, clientName, message, clinicPhone }) {
 // ── getActiveConversations ────────────────────────────────────────────────────
 
 async function getActiveConversations({ clinicId, windowMinutes = 15 }) {
-  const db    = await getDb();
+  const db = await getDb();
   const since = new Date(Date.now() - windowMinutes * 60 * 1000);
 
   const clients = await db
@@ -375,7 +377,7 @@ async function getActiveConversations({ clinicId, windowMinutes = 15 }) {
     .toArray();
 
   return clients.map(c => ({
-    id:   c._id.toString(),
+    id: c._id.toString(),
     text: c.activitySummary ?? `${c.name} está em atendimento`,
     time: c.lastMessageAt,
     type: c.status === "novo" ? "novo_lead" : c.status === "agendado" ? "agendamento" : "mensagem",
@@ -418,9 +420,9 @@ mcpServer.registerTool("handle_message", {
   title: "Handle WhatsApp Message",
   description: "Processa mensagem do WhatsApp com tool calling + persistência no MongoDB",
   inputSchema: {
-    waId:        z.string(),
-    clientName:  z.string(),
-    message:     z.string(),
+    waId: z.string(),
+    clientName: z.string(),
+    message: z.string(),
     clinicPhone: z.string(),
   },
 }, async (args) => {
@@ -436,7 +438,7 @@ mcpServer.registerTool("get_active_conversations", {
   title: "Get Active Conversations",
   description: "Lista conversas ativas nos últimos N minutos",
   inputSchema: {
-    clinicId:      z.string(),
+    clinicId: z.string(),
     windowMinutes: z.number().optional(),
   },
 }, async ({ clinicId, windowMinutes }) => {
@@ -453,17 +455,17 @@ mcpServer.registerTool("mongo_find", {
   description: "Busca documentos em uma coleção",
   inputSchema: {
     collection: z.string(),
-    filter:     z.record(z.any()).optional(),
+    filter: z.record(z.any()).optional(),
     projection: z.record(z.any()).optional(),
-    limit:      z.number().optional(),
-    sort:       z.record(z.any()).optional(),
+    limit: z.number().optional(),
+    sort: z.record(z.any()).optional(),
   },
 }, async ({ collection, filter, projection, limit, sort }) => {
   try {
     const db = await getDb();
     let cursor = db.collection(collection).find(filter || {});
     if (projection) cursor = cursor.project(projection);
-    if (sort)       cursor = cursor.sort(sort);
+    if (sort) cursor = cursor.sort(sort);
     const docs = await cursor.limit(limit ?? 20).toArray();
     return { content: [{ type: "text", text: JSON.stringify(docs, null, 2) }] };
   } catch (err) {
@@ -477,7 +479,7 @@ mcpServer.registerTool("mongo_insert_one", {
   inputSchema: { collection: z.string(), document: z.record(z.any()) },
 }, async ({ collection, document }) => {
   try {
-    const db     = await getDb();
+    const db = await getDb();
     const result = await db.collection(collection).insertOne({ ...document, createdAt: new Date() });
     return { content: [{ type: "text", text: `Inserted _id: ${result.insertedId}` }] };
   } catch (err) {
@@ -490,13 +492,13 @@ mcpServer.registerTool("mongo_update_one", {
   description: "Atualiza um documento em uma coleção",
   inputSchema: {
     collection: z.string(),
-    filter:     z.record(z.any()),
-    update:     z.record(z.any()),
-    upsert:     z.boolean().optional(),
+    filter: z.record(z.any()),
+    update: z.record(z.any()),
+    upsert: z.boolean().optional(),
   },
 }, async ({ collection, filter, update, upsert }) => {
   try {
-    const db     = await getDb();
+    const db = await getDb();
     const result = await db.collection(collection).updateOne(filter, update, { upsert: upsert ?? false });
     return { content: [{ type: "text", text: `Matched: ${result.matchedCount}, Modified: ${result.modifiedCount}` }] };
   } catch (err) {
@@ -510,7 +512,7 @@ mcpServer.registerTool("mongo_aggregate", {
   inputSchema: { collection: z.string(), pipeline: z.array(z.record(z.any())) },
 }, async ({ collection, pipeline }) => {
   try {
-    const db      = await getDb();
+    const db = await getDb();
     const results = await db.collection(collection).aggregate(pipeline).toArray();
     return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
   } catch (err) {
