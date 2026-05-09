@@ -534,25 +534,31 @@ function chunkReply(replyData) {
   const rawArray = Array.isArray(replyData) ? replyData : [replyData];
   const finalArray = [];
   
-  for (let text of rawArray) {
-    if (typeof text !== "string") continue;
-    text = text.trim();
-    if (!text) continue;
+  for (let block of rawArray) {
+    if (typeof block !== "string") continue;
     
-    // Se a mensagem for maior que 80 caracteres, dividimos por pontuação final
-    if (text.length > 80) {
-      // Regex que pega frases terminadas em . ? ou ! seguidas de espaço ou fim da string
-      const sentences = text.match(/[^.!?]+[.!?]+(?:\s+|$)|[^.!?]+$/g);
-      if (sentences && sentences.length > 1) {
-        for (const s of sentences) {
-          const trimmed = s.trim();
-          if (trimmed) finalArray.push(trimmed);
+    // 1. Quebra por quebras de linha primeiro (muito comum em listas)
+    const lines = block.split(/\n+/);
+    
+    for (let line of lines) {
+      line = line.trim();
+      if (!line) continue;
+      
+      // 2. Se a linha ainda for longa (> 80), quebra por pontuação
+      if (line.length > 80) {
+        const sentences = line.match(/[^.!?]+[.!?]+(?:\s+|$)|[^.!?]+$/g);
+        if (sentences && sentences.length > 1) {
+          for (const s of sentences) {
+            const trimmed = s.trim();
+            if (trimmed) finalArray.push(trimmed);
+          }
+        } else {
+          finalArray.push(line);
         }
-        continue;
+      } else {
+        finalArray.push(line);
       }
     }
-    
-    finalArray.push(text);
   }
   
   return finalArray.length > 0 ? finalArray : ["Tive um problema ao gerar a resposta."];
