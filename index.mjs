@@ -672,7 +672,7 @@ async function handleMarketingMessage({ waId, clientName, message, db }) {
   console.log(`[marketing] ✓ ${clientName} (${waId}) — status: ${parsed.leadStatus}`);
 
   return {
-    reply:           parsed.reply,
+    reply:           replies,
     clientStatus:    "atendimento",
     activitySummary: parsed.activitySummary ?? `${clientName} entrou em contato`,
     intent:          parsed.intent ?? "Curioso",
@@ -831,7 +831,7 @@ async function handleMessage({ waId, clientName, message, phoneNumberId, scenari
   console.log(`[handleMessage] ✓ ${clientName} (${waId}) — status: ${parsed.clientStatus}`);
 
   return {
-    reply: parsed.reply,
+    reply: replies,
     clientStatus: parsed.clientStatus ?? "atendimento",
     activitySummary: parsed.activitySummary ?? `${clientName} entrou em contato`,
     intent: parsed.intent ?? "Curioso",
