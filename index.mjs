@@ -1,3 +1,5 @@
+import dotenv from "dotenv";
+dotenv.config({ path: ".env.local" });
 import express from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
@@ -30,6 +32,27 @@ async function getDb() {
   return mongoClient.db(MONGODB_DB);
 }
 
+/**
+ * Tenta extrair um objeto JSON de uma string que pode conter texto extra.
+ * Útil para evitar vazamento de JSON no WhatsApp quando a IA "tagarela".
+ */
+function tryExtractJson(text) {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (match) {
+      try {
+        return JSON.parse(match[0]);
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+}
+
 // ── System Prompt ─────────────────────────────────────────────────────────────
 
 function buildSystemPrompt({ clinicName, clinicDescription, services, businessHours, clientName, todayStr, todayISO }) {
@@ -46,10 +69,36 @@ ${servicesStr}
 ${hoursStr}
 
 ━━━ REGRAS DE ATENDIMENTO ━━━
-- Responda exatamente ao que o cliente perguntou
 - Seja natural, educada e objetiva
-- NÃO dê respostas genéricas
 - Use no máximo 2 frases na resposta para o cliente
+- Responda SOMENTE com informações deste prompt ou retornadas por uma ferramenta
+- NUNCA use conhecimento geral seu para responder sobre a clínica — você não sabe nada sobre ela além do que está escrito aqui
+
+━━━ O QUE VOCÊ PODE RESPONDER SEM USAR FERRAMENTAS ━━━
+Apenas estas situações não exigem ferramenta:
+- Saudações e apresentação ("Olá", "Como posso ajudar?")
+- Confirmar o nome da clínica e a lista de serviços acima
+- Horários de funcionamento acima
+- Encerrar conversa educadamente
+
+━━━ TUDO O MAIS EXIGE search_faq PRIMEIRO ━━━
+Para QUALQUER outra pergunta — preços, produtos usados, duração, preparo, pós-procedimento, contraindicações, profissionais, promoções, parcelamento, diferença entre procedimentos — você OBRIGATORIAMENTE deve:
+
+1. Chamar search_faq com a pergunta do cliente (mas reescrita com o contexto completo, ex: "O botox dói?" em vez de "isso dói?")
+2. search_faq retorna uma lista de candidatos: { results: [{ question, answer, source }] }
+3. VOCÊ deve analisar os candidatos e decidir:
+   - Algum deles responde DIRETAMENTE o que o cliente perguntou (mesmo procedimento, mesma informação)? → Responda com suas próprias palavras. NÃO copie literalmente.
+   - Os resultados falam de outro procedimento, outra informação ou são vagos? → OBRIGATÓRIO chamar register_doubt ANTES de responder. Só depois diga algo como "Vou checar isso aqui e já te falo!" (primeira pessoa)
+
+REGRA CRÍTICA: Se a pergunta é "Quanto tempo dura o botox?" e os resultados falam de LIMPEZA DE PELE ou de PRODUTO DO BOTOX mas NÃO de DURAÇÃO DO BOTOX → esses resultados NÃO respondem → chame register_doubt.
+Resultado sobre "mesmo procedimento mas informação diferente" = NÃO responde. Resultado sobre "informação certa mas procedimento diferente" = NÃO responde. Resultado genérico/vago (ex: "esse procedimento dói?") = NÃO se aplica a um procedimento específico, logo NÃO responde. Só chame register_doubt quando a resposta não estiver nos resultados.
+
+PROIBIDO usar qualquer uma destas frases:
+- "nossa equipe vai te responder", "a equipe vai responder", "já registrei sua dúvida", "equipe irá responder"
+Fale sempre em primeira pessoa, como se VOCÊ fosse verificar.
+
+PROIBIDO inventar ou deduzir qualquer detalhe específico da clínica. Esfoliantes, tônicos, marcas, preços, TEMPOS DE DURAÇÃO — você simplesmente não sabe e NUNCA deve adivinhar.
+REGRA DE AMNÉSIA: Se você sabe a resposta por conhecimento geral da internet (ex: "botox dura 6 meses", "Lifting demora 2 horas"), VOCÊ ESTÁ PROIBIDA DE USAR ESSA INFORMAÇÃO. Aja como se não soubesse. Só use informações que vieram DIRETAMENTE do search_faq.
 
 ━━━ CLASSIFICAÇÃO DO CLIENTE ━━━
 - "novo": primeiro contato, sem intenção definida
@@ -57,8 +106,7 @@ ${hoursStr}
 - "agendado": agendamento criado com sucesso pela ferramenta create_appointment
 - "parado": conversa encerrada ou sem resposta
 
-━━━ USO DE FERRAMENTAS ━━━
-Use as ferramentas quando necessário, antes de responder:
+━━━ USO DE FERRAMENTAS DE AGENDA ━━━
 - get_available_slots: quando o cliente perguntar por horários ou quiser agendar/remarcar
 - create_appointment: quando o cliente confirmar data, horário e procedimento
 - cancel_appointment: quando o cliente quiser cancelar um agendamento existente
@@ -68,10 +116,138 @@ Use as ferramentas quando necessário, antes de responder:
 Ao resolver datas relativas ("amanhã", "sexta", "semana que vem"), use como base hoje (${todayISO}).
 Para remarcar: primeiro chame get_client_appointments para obter o appointmentId, depois get_available_slots para confirmar disponibilidade, então reschedule_appointment.
 
+━━━ INTENÇÃO E POTENCIAL ━━━
+- intent: "Curioso", "Quer preço", "Pronto para comprar"
+- potential: "Baixo", "Médio", "Alto"
+Dica: Se o cliente agendar, a intenção é obrigatoriamente "Pronto para comprar" e o potencial é "Alto".
+
 ━━━ FORMATO DA RESPOSTA FINAL ━━━
 Após usar as ferramentas necessárias, responda SOMENTE com JSON válido. Nada fora do JSON.
 
-{"reply":"...","clientStatus":"novo|atendimento|agendado|parado","activitySummary":"${clientName} verbo + o que aconteceu"}`;
+{"reasoning":"Explique em 1 frase de ONDE você tirou a informação da resposta (ex: 'Veio do search_faq', 'Conhecimento geral - ALERTA: não posso usar, vou chamar register_doubt')","reply":"...","clientStatus":"novo|atendimento|agendado|parado","activitySummary":"${clientName} verbo + o que aconteceu","intent":"Curioso|Quer preço|Pronto para comprar","potential":"Baixo|Médio|Alto"}`;
+}
+
+// ── System Prompt de Marketing ────────────────────────────────────────────────
+
+// Corpo padrão — usado quando não há customização no banco
+const DEFAULT_MARKETING_PROMPT_BODY =
+`Você é a Lia, assistente virtual da empresa Lia — uma plataforma SaaS de secretária virtual com IA para clínicas odontológicas e estéticas.
+Seu objetivo é qualificar e converter dentistas e donos de clínicas em clientes pagantes da Lia.
+Você está conversando com {{clientName}}.
+Hoje é {{todayStr}}.
+
+━━━ SEU FOCO ━━━
+- Demonstrar o ROI da Lia: clínicas que automatizam o atendimento WhatsApp recuperam 3-5 horas/dia de trabalho administrativo
+- Redução de no-shows: a Lia confirma consultas automaticamente via WhatsApp
+- Atendimento 24/7: nenhum paciente fica sem resposta, mesmo fora do horário comercial
+- Agenda inteligente: a IA agenda, cancela e remarca sem intervenção humana
+- Mais pacientes na cadeira, menos tempo da recepcionista no telefone
+
+━━━ REGRAS ━━━
+- Seja consultiva, nunca invasiva
+- Máximo 2-3 frases por mensagem — seja direta e objetiva
+- Fale sempre em primeira pessoa como a Lia`;
+
+// Sufixo obrigatório — nunca editável, garante uso correto das ferramentas e formato JSON
+function buildMandatorySuffix(clientName) {
+  return `
+
+━━━ AGENDA DE DEMONSTRAÇÃO ━━━
+Quando o lead demonstrar interesse real em ver o produto ou pedir uma demonstração:
+1. Chame check_setup_slots para ver os horários disponíveis
+2. Apresente as opções de forma amigável ao lead
+3. Quando ele confirmar data e hora, chame book_setup_meeting com o slotId correspondente
+4. Confirme o agendamento e informe que nossa equipe vai entrar em contato para confirmar
+
+━━━ CLASSIFICAÇÃO DO LEAD ━━━
+- "novo": primeiro contato, sem intenção definida
+- "qualificado": dentista ou gestor de clínica identificado, engajado
+- "interessado": pediu demonstração, preço ou mais detalhes
+- "convertido": demonstração agendada com sucesso via book_setup_meeting
+
+━━━ FORMATO DA RESPOSTA FINAL ━━━
+Responda SOMENTE com JSON válido. Nada fora do JSON.
+
+{"reply":"...","leadStatus":"novo|qualificado|interessado|convertido","activitySummary":"${clientName} verbo + o que aconteceu","intent":"Curioso|Quer demonstração|Pronto para contratar","potential":"Baixo|Médio|Alto"}`;
+}
+
+function buildMarketingPrompt({ clientName, todayStr, customBody }) {
+  const body = (customBody ?? DEFAULT_MARKETING_PROMPT_BODY)
+    .replace(/\{\{clientName\}\}/g, clientName)
+    .replace(/\{\{todayStr\}\}/g, todayStr);
+  return body + buildMandatorySuffix(clientName);
+}
+
+function buildMarketingTools() {
+  return [
+    {
+      type: "function",
+      function: {
+        name: "check_setup_slots",
+        description: "Verifica os horários disponíveis na agenda de demonstração da Lia. Use quando o lead demonstrar interesse em ver o produto ou pedir uma reunião.",
+        parameters: { type: "object", properties: {} },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "book_setup_meeting",
+        description: "Reserva um horário na agenda de demonstração. Use SOMENTE após o lead confirmar explicitamente a data e o horário.",
+        parameters: {
+          type: "object",
+          properties: {
+            slotId: { type: "string", description: "ID do slot a reservar (obtido de check_setup_slots)" },
+          },
+          required: ["slotId"],
+        },
+      },
+    },
+  ];
+}
+
+async function executeMarketingTool(toolName, args, { db, waId, clientName }) {
+  switch (toolName) {
+    case "check_setup_slots": {
+      const slots = await db.collection("setup_agenda")
+        .find({ available: true })
+        .sort({ date: 1, time: 1 })
+        .limit(10)
+        .toArray();
+      if (slots.length === 0) return { available: [], message: "Nenhum horário disponível no momento" };
+      return {
+        available: slots.map(s => ({
+          id: s._id.toString(),
+          date: s.date,
+          time: s.time,
+        })),
+      };
+    }
+
+    case "book_setup_meeting": {
+      const { slotId } = args;
+      let slotOid;
+      try { slotOid = new ObjectId(slotId); } catch { return { success: false, reason: "ID de slot inválido" }; }
+
+      const slot = await db.collection("setup_agenda").findOne({ _id: slotOid, available: true });
+      if (!slot) return { success: false, reason: "Horário não disponível ou já reservado" };
+
+      await db.collection("setup_agenda").updateOne(
+        { _id: slotOid },
+        { $set: { available: false, bookedBy: { waId, name: clientName }, bookedAt: new Date() } }
+      );
+
+      await db.collection("leads_marketing").updateOne(
+        { waId },
+        { $set: { leadStatus: "convertido", meetingDate: slot.date, meetingTime: slot.time, updatedAt: new Date() } }
+      );
+
+      console.log(`[marketing] 🎉 Reunião marcada: ${clientName} → ${slot.date} às ${slot.time}`);
+      return { success: true, date: slot.date, time: slot.time };
+    }
+
+    default:
+      return { error: `Ferramenta desconhecida: ${toolName}` };
+  }
 }
 
 // ── Ferramentas da OpenAI ─────────────────────────────────────────────────────
@@ -148,6 +324,34 @@ function buildTools() {
         parameters: {
           type: "object",
           properties: {},
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "search_faq",
+        description: "Busca candidatos relevantes no FAQ da clínica e no histórico de dúvidas respondidas. Retorna uma lista de resultados ({ results: [...] }) para você analisar e decidir se algum responde a pergunta do cliente. Chame SEMPRE antes de registrar uma nova dúvida.",
+        parameters: {
+          type: "object",
+          properties: {
+            question: { type: "string", description: "A pergunta do cliente reescrita de forma autossuficiente e completa, incluindo o nome do procedimento ou serviço em questão. Não use pronomes como 'esse' ou 'isso'." },
+          },
+          required: ["question"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "register_doubt",
+        description: "Registra uma dúvida sem resposta para que a equipe da clínica responda. Use APENAS se search_faq retornar found: false.",
+        parameters: {
+          type: "object",
+          properties: {
+            question: { type: "string", description: "A dúvida do cliente reescrita de forma clara e COMPLETA, incluindo o nome do procedimento/contexto para que possa ser entendida isoladamente (ex: 'O Lifting Temporal dói?' em vez de 'esse procedimento dói?')" },
+          },
+          required: ["question"],
         },
       },
     },
@@ -245,6 +449,78 @@ async function executeTool(toolName, args, { db, clinicId, waId, clientName }) {
       }));
     }
 
+    case "search_faq": {
+      const { question } = args;
+      const clinicIdStr = clinicId.toString();
+      const queryWords = question.toLowerCase().split(/[\s,.!?]+/).filter(w => w.length > 2);
+
+      // Calcula quantas palavras da query aparecem no texto candidato
+      const scoreText = (text) => {
+        if (!text) return 0;
+        const lower = text.toLowerCase();
+        return queryWords.filter(w => lower.includes(w)).length;
+      };
+
+      // 1. FAQ da clínica
+      const config = await db.collection("clinicConfig").findOne({ clinicId: clinicIdStr });
+      const faqCandidates = (config?.faq ?? [])
+        .map(item => ({
+          question: item.question,
+          answer: item.answer,
+          source: "faq",
+          score: scoreText(item.question) + scoreText(item.answer),
+        }))
+        .filter(item => item.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 3);
+
+      // 2. Dúvidas já respondidas (aceita clinicId como ObjectId ou string)
+      const answeredDoubts = await db.collection("doubts")
+        .find({ $or: [{ clinicId }, { clinicId: clinicIdStr }], status: "respondida" })
+        .limit(100)
+        .toArray();
+
+      const doubtCandidates = answeredDoubts
+        .map(d => ({
+          question: d.question,
+          answer: d.answer,
+          source: "historico",
+          score: scoreText(d.question),
+        }))
+        .filter(d => d.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 3);
+
+      const results = [...faqCandidates, ...doubtCandidates]
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 5)
+        .map(({ question, answer, source }) => ({ question, answer, source }));
+
+      return { results };
+    }
+
+    case "register_doubt": {
+      const { question } = args;
+      const now = new Date();
+
+      const result = await db.collection("doubts").insertOne({
+        clinicId,
+        clientName,
+        phone: waId,
+        question,
+        status: "pendente",
+        createdAt: now,
+      });
+
+      await db.collection("clients").updateOne(
+        { waId, clinicId },
+        { $set: { pendingDoubtId: result.insertedId.toString(), updatedAt: now } }
+      );
+
+      console.log(`[tool] ❓ Dúvida registrada: "${question}" — id: ${result.insertedId}`);
+      return { success: true, doubtId: result.insertedId.toString() };
+    }
+
     default:
       return { error: `Ferramenta desconhecida: ${toolName}` };
   }
@@ -252,13 +528,125 @@ async function executeTool(toolName, args, { db, clinicId, waId, clientName }) {
 
 // ── Lógica de Negócio ─────────────────────────────────────────────────────────
 
-async function handleMessage({ waId, clientName, message, clinicPhone }) {
+async function handleMarketingMessage({ waId, clientName, message, db }) {
+  const leadDoc = await db.collection("leads_marketing").findOne(
+    { waId },
+    { projection: { messages: { $slice: -10 } } }
+  );
+  const history = leadDoc?.messages ?? [];
+
+  const today = new Date();
+  const todayStr = today.toLocaleDateString("pt-BR", {
+    timeZone: "America/Sao_Paulo",
+    weekday: "long", year: "numeric", month: "long", day: "numeric",
+  });
+
+  // Carrega prompt customizado do banco (ou usa o padrão se não houver)
+  const promptConfig = await db.collection("marketing_config").findOne({ type: "system_prompt" });
+  const systemPrompt = buildMarketingPrompt({ clientName, todayStr, customBody: promptConfig?.content ?? null });
+  const tools = buildMarketingTools();
+
+  const loopMessages = [
+    { role: "system", content: systemPrompt },
+    ...history.map(m => ({
+      role: m.from === "client" ? "user" : "assistant",
+      content: m.text,
+    })),
+    { role: "user", content: message },
+  ];
+
+  let finalContent = null;
+
+  for (let i = 0; i < 5; i++) {
+    const aiResp = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      max_tokens: 400,
+      messages: loopMessages,
+      tools,
+      tool_choice: "auto",
+      response_format: { type: "json_object" },
+    });
+
+    const { finish_reason, message: aiMessage } = aiResp.choices[0];
+
+    if (finish_reason === "tool_calls") {
+      loopMessages.push(aiMessage);
+
+      for (const toolCall of aiMessage.tool_calls) {
+        const args = JSON.parse(toolCall.function.arguments);
+        console.log(`[marketing:tool] → ${toolCall.function.name}`, args);
+
+        const result = await executeMarketingTool(toolCall.function.name, args, { db, waId, clientName });
+        console.log(`[marketing:tool] ← ${toolCall.function.name}`, result);
+
+        loopMessages.push({
+          role: "tool",
+          tool_call_id: toolCall.id,
+          content: JSON.stringify(result),
+        });
+      }
+    } else {
+      finalContent = aiMessage.content;
+      break;
+    }
+  }
+
+  if (!finalContent) throw new Error("Loop de ferramentas marketing não convergiu após 5 iterações");
+
+  let parsed = tryExtractJson(finalContent);
+
+  if (!parsed?.reply) {
+    parsed = {
+      reply: finalContent || "Olá! Sou a Lia. Como posso ajudar sua clínica?",
+      leadStatus: "novo",
+      activitySummary: `${clientName} entrou em contato`,
+    };
+  }
+
+  const now = new Date();
+  const clientMsg = { from: "client", text: message, createdAt: now.toISOString() };
+  const iaMsg    = { from: "ia",     text: parsed.reply, createdAt: new Date(now.getTime() + 1).toISOString() };
+
+  await db.collection("leads_marketing").updateOne(
+    { waId },
+    {
+      $set: {
+        name:            clientName,
+        phone:           waId,
+        leadStatus:      parsed.leadStatus ?? "novo",
+        activitySummary: parsed.activitySummary ?? `${clientName} entrou em contato`,
+        intent:          parsed.intent ?? "Curioso",
+        potential:       parsed.potential ?? "Médio",
+        lastMessageAt:   now,
+        updatedAt:       now,
+      },
+      $push:        { messages: { $each: [clientMsg, iaMsg] } },
+      $setOnInsert: { createdAt: now, source: "whatsapp_marketing", ia_paused: false },
+    },
+    { upsert: true }
+  );
+
+  console.log(`[marketing] ✓ ${clientName} (${waId}) — status: ${parsed.leadStatus}`);
+
+  return {
+    reply:           parsed.reply,
+    clientStatus:    "atendimento",
+    activitySummary: parsed.activitySummary ?? `${clientName} entrou em contato`,
+    intent:          parsed.intent ?? "Curioso",
+    potential:       parsed.potential ?? "Médio",
+  };
+}
+
+async function handleMessage({ waId, clientName, message, phoneNumberId, scenario = "clinic" }) {
   const db = await getDb();
 
-  // 1. Identificar clínica pelo número
-  const cleanPhone = clinicPhone.replace(/\D/g, "");
-  const clinic = await db.collection("clinics").findOne({ "whatsapp.number": cleanPhone });
-  if (!clinic) throw new Error(`Clínica não encontrada para o número: ${cleanPhone}`);
+  if (scenario === "marketing") {
+    return handleMarketingMessage({ waId, clientName, message, db });
+  }
+
+  // 1. Identificar clínica pelo phone_number_id
+  const clinic = await db.collection("clinics").findOne({ "whatsapp.phone_number_id": phoneNumberId });
+  if (!clinic) throw new Error(`Clínica não encontrada para phone_number_id: ${phoneNumberId}`);
 
   const clinicIdStr = clinic._id.toString();
   const clinicId = clinic._id;
@@ -313,6 +701,7 @@ async function handleMessage({ waId, clientName, message, clinicPhone }) {
       messages: loopMessages,
       tools,
       tool_choice: "auto",
+      response_format: { type: "json_object" },
     });
 
     const { finish_reason, message: aiMessage } = aiResp.choices[0];
@@ -344,13 +733,12 @@ async function handleMessage({ waId, clientName, message, clinicPhone }) {
   if (!finalContent) throw new Error("Loop de ferramentas não convergiu após 5 iterações");
 
   // 5. Parsear JSON da resposta final
-  let parsed;
-  try {
-    parsed = JSON.parse(finalContent);
-  } catch {
-    // Fallback: se a IA não retornou JSON perfeito, usa o texto como reply
+  let parsed = tryExtractJson(finalContent);
+
+  if (!parsed || !parsed.reply) {
+    console.warn(`[handleMessage] IA não retornou JSON válido ou faltou campo reply. Conteúdo: ${finalContent}`);
     parsed = {
-      reply: finalContent,
+      reply: finalContent || "Tive um problema ao processar sua resposta.",
       clientStatus: "atendimento",
       activitySummary: `${clientName} entrou em contato`,
     };
@@ -372,14 +760,14 @@ async function handleMessage({ waId, clientName, message, clinicPhone }) {
         clinicId,
         status: parsed.clientStatus ?? "atendimento",
         activitySummary: parsed.activitySummary ?? `${clientName} entrou em contato`,
+        intent: parsed.intent ?? "Curioso",
+        potential: parsed.potential ?? "Médio",
         lastMessageAt: now,
         updatedAt: now,
       },
       $push: { messages: { $each: [clientMsg, iaMsg] } },
       $setOnInsert: {
         tags: [],
-        intent: "Curioso",
-        potential: "Médio",
         aiInsight: "",
         conversationStatus: "active",
         pendingDoubtId: null,
@@ -396,6 +784,8 @@ async function handleMessage({ waId, clientName, message, clinicPhone }) {
     reply: parsed.reply,
     clientStatus: parsed.clientStatus ?? "atendimento",
     activitySummary: parsed.activitySummary ?? `${clientName} entrou em contato`,
+    intent: parsed.intent ?? "Curioso",
+    potential: parsed.potential ?? "Médio",
   };
 }
 
@@ -436,12 +826,12 @@ function authMiddleware(req, res, next) {
 }
 
 app.post("/chat", authMiddleware, async (req, res) => {
-  const { waId, clientName, message, clinicPhone } = req.body ?? {};
-  if (!waId || !clientName || !message || !clinicPhone) {
-    return res.status(400).json({ error: "Campos obrigatórios: waId, clientName, message, clinicPhone" });
+  const { waId, clientName, message, phoneNumberId, scenario } = req.body ?? {};
+  if (!waId || !clientName || !message || !phoneNumberId) {
+    return res.status(400).json({ error: "Campos obrigatórios: waId, clientName, message, phoneNumberId" });
   }
   try {
-    const result = await handleMessage({ waId, clientName, message, clinicPhone });
+    const result = await handleMessage({ waId, clientName, message, phoneNumberId, scenario });
     res.json(result);
   } catch (err) {
     console.error("[/chat]", err);
@@ -459,10 +849,11 @@ mcpServer.registerTool("handle_message", {
   title: "Handle WhatsApp Message",
   description: "Processa mensagem do WhatsApp com tool calling + persistência no MongoDB",
   inputSchema: {
-    waId: z.string(),
-    clientName: z.string(),
-    message: z.string(),
-    clinicPhone: z.string(),
+    waId:          z.string(),
+    clientName:    z.string(),
+    message:       z.string(),
+    phoneNumberId: z.string(),
+    scenario:      z.enum(["marketing", "clinic"]).optional(),
   },
 }, async (args) => {
   try {
