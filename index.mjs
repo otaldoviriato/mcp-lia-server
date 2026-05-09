@@ -123,8 +123,9 @@ Dica: Se o cliente agendar, a intenção é obrigatoriamente "Pronto para compra
 
 ━━━ FORMATO DA RESPOSTA FINAL ━━━
 Após usar as ferramentas necessárias, responda SOMENTE com JSON válido. Nada fora do JSON.
+Para soar natural no WhatsApp, NUNCA envie blocos de texto gigantes. Se a resposta for longa, quebre-a em uma lista de mensagens curtas (40-50 caracteres cada, ou separando frases logicamente).
 
-{"reasoning":"Explique em 1 frase de ONDE você tirou a informação da resposta (ex: 'Veio do search_faq', 'Conhecimento geral - ALERTA: não posso usar, vou chamar register_doubt')","reply":"...","clientStatus":"novo|atendimento|agendado|parado","activitySummary":"${clientName} verbo + o que aconteceu","intent":"Curioso|Quer preço|Pronto para comprar","potential":"Baixo|Médio|Alto"}`;
+{"reasoning":"Explique em 1 frase de ONDE você tirou a informação da resposta (ex: 'Veio do search_faq', 'Conhecimento geral - ALERTA: não posso usar, vou chamar register_doubt')","reply":["Sua primeira frase curta...", "E a segunda frase..."],"clientStatus":"novo|atendimento|agendado|parado","activitySummary":"${clientName} verbo + o que aconteceu","intent":"Curioso|Quer preço|Pronto para comprar","potential":"Baixo|Médio|Alto"}`;
 }
 
 // ── System Prompt de Marketing ────────────────────────────────────────────────
@@ -167,8 +168,9 @@ Quando o lead demonstrar interesse real em ver o produto ou pedir uma demonstra�
 
 ━━━ FORMATO DA RESPOSTA FINAL ━━━
 Responda SOMENTE com JSON válido. Nada fora do JSON.
+Para soar natural no WhatsApp, NUNCA envie blocos de texto gigantes. Se a resposta for longa, quebre-a em uma lista de mensagens curtas (40-50 caracteres cada, ou separando frases logicamente).
 
-{"reply":"...","leadStatus":"novo|qualificado|interessado|convertido","activitySummary":"${clientName} verbo + o que aconteceu","intent":"Curioso|Quer demonstração|Pronto para contratar","potential":"Baixo|Médio|Alto"}`;
+{"reply":["Sua primeira frase curta...", "E a segunda frase..."],"leadStatus":"novo|qualificado|interessado|convertido","activitySummary":"${clientName} verbo + o que aconteceu","intent":"Curioso|Quer demonstração|Pronto para contratar","potential":"Baixo|Médio|Alto"}`;
 }
 
 function buildMarketingPrompt({ clientName, todayStr, customBody }) {
@@ -528,6 +530,34 @@ async function executeTool(toolName, args, { db, clinicId, waId, clientName }) {
 
 // ── Lógica de Negócio ─────────────────────────────────────────────────────────
 
+function chunkReply(replyData) {
+  const rawArray = Array.isArray(replyData) ? replyData : [replyData];
+  const finalArray = [];
+  
+  for (let text of rawArray) {
+    if (typeof text !== "string") continue;
+    text = text.trim();
+    if (!text) continue;
+    
+    // Se a mensagem for maior que 80 caracteres, dividimos por pontuação final
+    if (text.length > 80) {
+      // Regex que pega frases terminadas em . ? ou ! seguidas de espaço ou fim da string
+      const sentences = text.match(/[^.!?]+[.!?]+(?:\s+|$)|[^.!?]+$/g);
+      if (sentences && sentences.length > 1) {
+        for (const s of sentences) {
+          const trimmed = s.trim();
+          if (trimmed) finalArray.push(trimmed);
+        }
+        continue;
+      }
+    }
+    
+    finalArray.push(text);
+  }
+  
+  return finalArray.length > 0 ? finalArray : ["Tive um problema ao gerar a resposta."];
+}
+
 async function handleMarketingMessage({ waId, clientName, message, db }) {
   const leadDoc = await db.collection("leads_marketing").findOne(
     { waId },
@@ -597,7 +627,7 @@ async function handleMarketingMessage({ waId, clientName, message, db }) {
 
   if (!parsed?.reply) {
     parsed = {
-      reply: finalContent || "Olá! Sou a Lia. Como posso ajudar sua clínica?",
+      reply: finalContent ? [finalContent] : ["Olá! Sou a Lia.", "Como posso ajudar sua clínica?"],
       leadStatus: "novo",
       activitySummary: `${clientName} entrou em contato`,
     };
@@ -605,7 +635,14 @@ async function handleMarketingMessage({ waId, clientName, message, db }) {
 
   const now = new Date();
   const clientMsg = { from: "client", text: message, createdAt: now.toISOString() };
-  const iaMsg    = { from: "ia",     text: parsed.reply, createdAt: new Date(now.getTime() + 1).toISOString() };
+
+  // Garante que reply é array e força a quebra de textos longos
+  const replies = chunkReply(parsed.reply);
+  const iaMsgs = replies.map((text, i) => ({
+    from: "ia",
+    text,
+    createdAt: new Date(now.getTime() + i + 1).toISOString(),
+  }));
 
   await db.collection("leads_marketing").updateOne(
     { waId },
@@ -620,7 +657,7 @@ async function handleMarketingMessage({ waId, clientName, message, db }) {
         lastMessageAt:   now,
         updatedAt:       now,
       },
-      $push:        { messages: { $each: [clientMsg, iaMsg] } },
+      $push:        { messages: { $each: [clientMsg, ...iaMsgs] } },
       $setOnInsert: { createdAt: now, source: "whatsapp_marketing", ia_paused: false },
     },
     { upsert: true }
@@ -738,7 +775,7 @@ async function handleMessage({ waId, clientName, message, phoneNumberId, scenari
   if (!parsed || !parsed.reply) {
     console.warn(`[handleMessage] IA não retornou JSON válido ou faltou campo reply. Conteúdo: ${finalContent}`);
     parsed = {
-      reply: finalContent || "Tive um problema ao processar sua resposta.",
+      reply: finalContent ? [finalContent] : ["Tive um problema ao processar sua resposta."],
       clientStatus: "atendimento",
       activitySummary: `${clientName} entrou em contato`,
     };
@@ -749,7 +786,14 @@ async function handleMessage({ waId, clientName, message, phoneNumberId, scenari
   // 6. Salvar mensagens e atualizar cliente
   const now = new Date();
   const clientMsg = { from: "client", text: message, createdAt: now.toISOString() };
-  const iaMsg = { from: "ia", text: parsed.reply, createdAt: new Date(now.getTime() + 1).toISOString() };
+
+  // Garante que reply é array e força a quebra de textos longos
+  const replies = chunkReply(parsed.reply);
+  const iaMsgs = replies.map((text, i) => ({
+    from: "ia",
+    text,
+    createdAt: new Date(now.getTime() + i + 1).toISOString(),
+  }));
 
   await db.collection("clients").updateOne(
     { waId, clinicId },
@@ -765,7 +809,7 @@ async function handleMessage({ waId, clientName, message, phoneNumberId, scenari
         lastMessageAt: now,
         updatedAt: now,
       },
-      $push: { messages: { $each: [clientMsg, iaMsg] } },
+      $push: { messages: { $each: [clientMsg, ...iaMsgs] } },
       $setOnInsert: {
         tags: [],
         aiInsight: "",
